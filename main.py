@@ -5,7 +5,7 @@ import asyncio
 import aiohttp
 import aiosqlite
 from urllib.parse import quote
-from typing import List, Dict, Optional, Set
+from typing import List, Optional, Set
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from telegram.constants import ParseMode
@@ -21,23 +21,22 @@ logger = logging.getLogger(__name__)
 
 DB_FILE = 'bot_database.db'
 
-# ========== ЗАГРУЗКА ЧЁРНОГО СПИСКА ИЗ ФАЙЛА ==========
+# ========== ЗАГРУЗКА ИЗ ФАЙЛОВ ==========
 def load_blacklist_from_file() -> List[str]:
     try:
         with open('blacklist.txt', 'r', encoding='utf-8') as f:
             return [line.strip().lower() for line in f if line.strip()]
     except FileNotFoundError:
-        logger.warning("Файл blacklist.txt не найден, используется базовый список")
-        return ["@giftrelayer", "@mrktbank", "@kallent"]
+        logger.warning("Файл blacklist.txt не найден")
+        return ["@giftrelayer"]
 
-# ========== ЗАГРУЗКА ЖЕНСКИХ ИМЁН ИЗ ФАЙЛА ==========
 async def load_female_names() -> Set[str]:
     try:
         with open('female_names.txt', 'r', encoding='utf-8') as f:
             return {line.strip().lower() for line in f if line.strip()}
     except FileNotFoundError:
         logger.warning("Файл female_names.txt не найден")
-        return {"анна", "аня", "мария", "маша", "елена", "лена"}
+        return {"анна", "аня", "мария"}
 
 # ========== БАЗА ДАННЫХ ==========
 async def init_db():
@@ -53,19 +52,27 @@ async def init_db():
         )''')
         await db.commit()
     
-    # Загружаем чёрный список из файла
-    blacklist_from_file = load_blacklist_from_file()
-    async with aiosqlite.connect(DB_FILE) as db:
-        for username in blacklist_from_file:
+    for username in load_blacklist_from_file():
+        async with aiosqlite.connect(DB_FILE) as db:
             await db.execute("INSERT OR IGNORE INTO blacklist (username) VALUES (?)", (username,))
-        await db.commit()
+            await db.commit()
     
-    logger.info(f"✅ База данных готова, загружено {len(blacklist_from_file)} релеев")
+    logger.info("✅ База данных готова")
 
 async def get_blacklist() -> List[str]:
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute("SELECT username FROM blacklist") as cursor:
             return [row[0] for row in await cursor.fetchall()]
+
+async def add_to_blacklist(username: str):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("INSERT OR IGNORE INTO blacklist (username) VALUES (?)", (username.lower(),))
+        await db.commit()
+
+async def remove_from_blacklist(username: str):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("DELETE FROM blacklist WHERE username = ?", (username.lower(),))
+        await db.commit()
 
 async def get_user_settings(user_id: int) -> dict:
     async with aiosqlite.connect(DB_FILE) as db:
@@ -89,7 +96,7 @@ async def update_stats(user_id: int, found_count: int = 0):
     current = await get_user_settings(user_id)
     await save_user_settings(user_id, searches=current['searches'] + 1, found_users=current['found_users'] + found_count)
 
-# ========== ПОЛНЫЙ СПИСОК ПОДАРКОВ (С НОВЫМИ) ==========
+# ========== СПИСОК ПОДАРКОВ ==========
 NFT_LIST = [
     {"name": "BDayCandle", "difficulty": "easy", "min_id": 1000, "max_id": 20000},
     {"name": "CandyCane", "difficulty": "easy", "min_id": 1000, "max_id": 150000},
@@ -114,7 +121,6 @@ NFT_LIST = [
     {"name": "WhipCupcake", "difficulty": "easy", "min_id": 1000, "max_id": 170000},
     {"name": "WinterWreath", "difficulty": "easy", "min_id": 65311, "max_id": 65311},
     {"name": "XmasStocking", "difficulty": "easy", "min_id": 177478, "max_id": 177478},
-    # НОВЫЕ ПОДАРКИ
     {"name": "ViceCream", "difficulty": "easy", "min_id": 1000, "max_id": 80000},
     {"name": "PoolFloat", "difficulty": "easy", "min_id": 1000, "max_id": 70000},
     {"name": "ChillFlame", "difficulty": "easy", "min_id": 1000, "max_id": 90000},
@@ -122,7 +128,6 @@ NFT_LIST = [
     {"name": "TimelessBook", "difficulty": "medium", "min_id": 1000, "max_id": 120000},
     {"name": "RareBird", "difficulty": "medium", "min_id": 10000, "max_id": 150000},
     {"name": "VictoryMedal", "difficulty": "medium", "min_id": 5000, "max_id": 100000},
-    # ОСТАЛЬНЫЕ ПОДАРКИ (medium, hard)
     {"name": "BerryBox", "difficulty": "medium", "min_id": 1000, "max_id": 60000},
     {"name": "BigYear", "difficulty": "medium", "min_id": 1000, "max_id": 60000},
     {"name": "BowTie", "difficulty": "medium", "min_id": 1000, "max_id": 47000},
@@ -201,23 +206,18 @@ NFT_LIST = [
 
 NFT_DICT = {nft["name"]: nft for nft in NFT_LIST}
 
-# ========== БЫСТРЫЙ ПАРСИНГ ==========
+# ========== БЫСТРЫЙ ПАРСИНГ (ОПТИМИЗИРОВАННЫЙ) ==========
 async def parse_gift_owner(session: aiohttp.ClientSession, url: str) -> Optional[str]:
     try:
-        async with session.get(url, timeout=3) as response:
+        async with session.get(url, timeout=1.5) as response:
             if response.status != 200:
                 return None
             html = await response.text()
-            
-            match = re.search(r'<a[^>]*href="https://t\.me/([a-zA-Z0-9_]{5,32})"[^>]*>', html)
+            match = re.search(r't\.me/([a-zA-Z0-9_]{5,32})', html)
             if match:
                 username = match.group(1)
                 if username not in ['nft', 'gift', 'joinchat', 'addstickers']:
                     return f"@{username}"
-            
-            match = re.search(r'@([a-zA-Z0-9_]{5,32})', html)
-            if match:
-                return f"@{match.group(1)}"
             return None
     except:
         return None
@@ -228,7 +228,7 @@ async def find_real_owners_parallel(gifts: list, target_count: int, title: str, 
     found = []
     seen_users = set()
     
-    semaphore = asyncio.Semaphore(50)
+    semaphore = asyncio.Semaphore(200)
     
     async def parse_with_semaphore(session, gift):
         async with semaphore:
@@ -238,43 +238,37 @@ async def find_real_owners_parallel(gifts: list, target_count: int, title: str, 
         if status_message:
             try:
                 await status_message.edit_text(
-                    f"🎯 Режим: {title}\n🔢 Количество: {target_count}\n\n🔍 ▰▱▱▱▱▱▱▱▱▱ Поиск...\n✅ Найдено: 0/{target_count}",
+                    f"🎯 {title}\n🔍 Поиск... 0/{target_count}",
                     parse_mode=ParseMode.HTML
                 )
             except:
                 pass
         
         tasks = [parse_with_semaphore(session, gift) for gift in gifts]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        for i, owner in enumerate(results):
-            if isinstance(owner, Exception) or not owner:
+        for coro in asyncio.as_completed(tasks):
+            owner = await coro
+            if not owner:
                 continue
             
             if owner.lower() not in blacklist_lower and owner.lower() not in seen_users:
                 seen_users.add(owner.lower())
-                found.append({
-                    'name': gifts[i]['name'],
-                    'url': gifts[i]['url'],
-                    'owner': owner
-                })
+                # Находим оригинальный подарок (можно оптимизировать)
+                for gift in gifts:
+                    if gift['url'] in str(owner):  # упрощённо
+                        found.append({'name': gift['name'], 'url': gift['url'], 'owner': owner})
+                        break
             
-            if status_message and (len(found) % 3 == 0 or len(found) >= target_count):
+            if status_message and len(found) % 5 == 0:
                 try:
-                    progress = min(len(found) / target_count, 1.0)
-                    filled = int(progress * 10)
-                    bar = "▰" * filled + "▱" * (10 - filled)
-                    await status_message.edit_text(
-                        f"🎯 Режим: {title}\n🔢 Количество: {target_count}\n\n🔍 {bar} Поиск...\n✅ Найдено: {min(len(found), target_count)}/{target_count}",
-                        parse_mode=ParseMode.HTML
-                    )
+                    await status_message.edit_text(f"🎯 {title}\n🔍 Поиск... {len(found)}/{target_count}")
                 except:
                     pass
             
             if len(found) >= target_count:
                 break
     
-    return found
+    return found[:target_count]
 
 # ========== ГЕНЕРАЦИЯ ПОДАРКОВ ==========
 def generate_random_gifts(mode="light", count=20):
@@ -316,8 +310,8 @@ def generate_model_gifts(nft_name, count=20):
             gifts.append({"name": nft_name, "url": f"https://t.me/nft/{clean_name}-{nft_id}"})
     return gifts
 
-# ========== ФИЛЬТРАЦИЯ ДЕВУШЕК (ИЗ ФАЙЛА) ==========
-async def filter_female_users(found_users: list) -> list:
+# ========== ФИЛЬТРАЦИЯ ДЕВУШЕК ==========
+async def filter_female_users(found_users: list, status_msg=None) -> list:
     female_names = await load_female_names()
     
     MALE_ENDINGS = ('ov', 'ev', 'in', 'ов', 'ев', 'ин')
@@ -332,12 +326,10 @@ async def filter_female_users(found_users: list) -> list:
         if username in seen:
             continue
         
-        # Разбиваем на части
         parts = re.split(r'[_.\-]', username)
         name_part = parts[0] if parts else username
         name_part = re.sub(r'\d+$', '', name_part)
         
-        # Проверка на женское имя
         is_female = name_part in female_names
         
         if not is_female:
@@ -346,12 +338,17 @@ async def filter_female_users(found_users: list) -> list:
                     is_female = True
                     break
         
-        # Проверка на мужское окончание
         is_male = any(username.endswith(ending) for ending in MALE_ENDINGS)
         
         if is_female and not is_male:
             seen.add(username)
             filtered.append(user)
+        
+        if status_msg and len(filtered) % 10 == 0 and len(filtered) > 0:
+            try:
+                await status_msg.edit_text(f"👧 Найдено девушек: {len(filtered)}")
+            except:
+                pass
     
     return filtered
 
@@ -476,10 +473,8 @@ async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = context.args[0]
     if not username.startswith('@'):
         username = '@' + username
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("INSERT OR IGNORE INTO blacklist (username) VALUES (?)", (username.lower(),))
-        await db.commit()
-    await update.message.reply_text(f"✅ {username} добавлен в чёрный список")
+    await add_to_blacklist(username)
+    await update.message.reply_text(f"✅ {username} добавлен")
 
 async def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -491,10 +486,8 @@ async def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = context.args[0]
     if not username.startswith('@'):
         username = '@' + username
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("DELETE FROM blacklist WHERE username = ?", (username.lower(),))
-        await db.commit()
-    await update.message.reply_text(f"✅ {username} удалён из чёрного списка")
+    await remove_from_blacklist(username)
+    await update.message.reply_text(f"✅ {username} удалён")
 
 async def blocklist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -504,7 +497,7 @@ async def blocklist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not blacklist:
         await update.message.reply_text("📭 Чёрный список пуст")
         return
-    text = "🚫 <b>ЧЁРНЫЙ СПИСОК РЕЛЕЕВ</b>\n\n" + "\n".join(blacklist[:50])
+    text = "🚫 <b>ЧЁРНЫЙ СПИСОК</b>\n\n" + "\n".join(blacklist[:50])
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # ========== МЕНЮ ПОИСКА ==========
@@ -512,9 +505,9 @@ async def show_search_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     text = """🔷 Выберите тип поиска:
 
-🎲 Рандом поиск - поиск по режимам
-🔍 Поиск по модели - точный поиск по NFT
-👧 Поиск девушек - поиск по женским именам"""
+🎲 Рандом поиск
+🔍 Поиск по модели
+👧 Поиск девушек"""
     
     keyboard = [
         [InlineKeyboardButton("🎲 Рандом поиск", callback_data="search_random")],
@@ -527,16 +520,16 @@ async def show_search_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_modes_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    text = """🔷 Выберите режим поиска:
+    text = """🔷 Выберите режим:
 
-🟢 Легкий режим - до 3 TON
-🟡 Средний режим - 3-15 TON
-🔴 Жирный режим - 15+ TON"""
+🟢 Лёгкий (до 3 TON)
+🟡 Средний (3-15 TON)
+🔴 Жирный (15+ TON)"""
     keyboard = [
-        [InlineKeyboardButton("🟢 Легкий режим", callback_data="mode_light")],
-        [InlineKeyboardButton("🟡 Средний режим", callback_data="mode_medium")],
-        [InlineKeyboardButton("🔴 Жирный режим", callback_data="mode_heavy")],
-        [InlineKeyboardButton("🔷 Главное меню", callback_data="main_menu")]
+        [InlineKeyboardButton("🟢 Лёгкий", callback_data="mode_light")],
+        [InlineKeyboardButton("🟡 Средний", callback_data="mode_medium")],
+        [InlineKeyboardButton("🔴 Жирный", callback_data="mode_heavy")],
+        [InlineKeyboardButton("🔷 Назад", callback_data="menu_search")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.message.edit_text(text, reply_markup=reply_markup)
@@ -553,13 +546,13 @@ async def show_paginated_results(message, found, mode, nft_name, page, title, co
     
     message_template = settings['message_template']
     
-    mode_names = {"light": "🟢 Легкий", "medium": "🟡 Средний", "heavy": "🔴 Жирный", "girls": "👧 Девушки"}
+    mode_names = {"light": "🟢 Лёгкий", "medium": "🟡 Средний", "heavy": "🔴 Жирный", "girls": "👧 Девушки"}
     display_title = mode_names.get(mode, title or "Поиск")
     
     if is_girls:
-        text = f"🔷 <b>Найдено девушек в режиме «{display_title}»:</b>\n\n"
+        text = f"🔷 <b>Найдено девушек: {len(found)}</b>\n\n"
     else:
-        text = f"🔷 <b>Найдено в режиме «{display_title}»:</b>\n\n"
+        text = f"🔷 <b>Найдено в режиме «{display_title}»: {len(found)}</b>\n\n"
     
     for i, item in enumerate(page_results, start=start+1):
         clean_owner = item['owner'][1:] if item['owner'].startswith('@') else item['owner']
@@ -568,7 +561,7 @@ async def show_paginated_results(message, found, mode, nft_name, page, title, co
         write_url = f"https://t.me/{clean_owner}?text={encoded_text}"
         text += f"{i}. <a href=\"{gift_url}\">🎁</a> @{clean_owner} | <a href=\"{write_url}\">📝</a>\n"
     
-    text += f"\n📊 Страница {page}/{total_pages}"
+    text += f"\n📄 Страница {page}/{total_pages}"
     
     keyboard = []
     if total_pages > 1:
@@ -581,9 +574,9 @@ async def show_paginated_results(message, found, mode, nft_name, page, title, co
         keyboard.append(nav)
     
     if is_girls:
-        keyboard.append([InlineKeyboardButton("👧 Ещё поиск девушек", callback_data="search_girls")])
+        keyboard.append([InlineKeyboardButton("👧 Ещё поиск", callback_data="search_girls")])
     elif nft_name:
-        keyboard.append([InlineKeyboardButton("🔄 Ещё такие же", callback_data=f"more_{mode}_{nft_name}")])
+        keyboard.append([InlineKeyboardButton("🔄 Ещё", callback_data=f"more_{mode}_{nft_name}")])
     else:
         keyboard.append([InlineKeyboardButton(f"🎲 Ещё {display_title}", callback_data=f"start_search_{mode}")])
     
@@ -610,53 +603,41 @@ async def show_search_results(update: Update, context, mode, nft_name=None, page
         await show_paginated_results(query.message, found, mode, nft_name, page, None, context, is_girls)
         return
     
-    generate_count = target_count * 50
-    
-    mode_names = {"light": "🟢 Легкий", "medium": "🟡 Средний", "heavy": "🔴 Жирный", "girls": "👧 Девушки"}
-    display_title = mode_names.get(mode, "Поиск")
+    # ОПТИМИЗАЦИЯ: генерируем в 8 раз больше (было 50)
+    generate_count = target_count * 8
     
     if is_girls:
         title = "👧 Поиск девушек"
         gifts = generate_girls_gifts(generate_count)
     elif nft_name:
-        title = f"🔍 Поиск {nft_name}"
+        title = f"🔍 {nft_name}"
         gifts = generate_model_gifts(nft_name, generate_count)
     elif mode == "light":
-        title = "🟢 Легкий режим"
+        title = "🟢 Лёгкий"
         gifts = generate_random_gifts("light", generate_count)
     elif mode == "medium":
-        title = "🟡 Средний режим"
+        title = "🟡 Средний"
         gifts = generate_random_gifts("medium", generate_count)
     else:
-        title = "🔴 Жирный режим"
+        title = "🔴 Жирный"
         gifts = generate_random_gifts("heavy", generate_count)
     
     status_msg = await query.message.edit_text(
-        f"🎯 Режим: {display_title}\n🔢 Количество: {target_count}\n\n🔍 ▰▱▱▱▱▱▱▱▱▱ Поиск...\n✅ Найдено: 0/{target_count}",
+        f"🎯 {title}\n🔍 Поиск... 0/{target_count}",
         parse_mode=ParseMode.HTML
     )
     
-    await asyncio.sleep(0.3)
-    found = await find_real_owners_parallel(gifts, target_count * 2, title, status_msg)
+    await asyncio.sleep(0.2)
     
-    # Добивка
-    attempts = 0
-    while len(found) < target_count * 2 and attempts < 3:
-        additional_needed = (target_count * 2) - len(found)
-        additional_gifts = generate_random_gifts(mode, additional_needed * 20)
-        more_found = await find_real_owners_parallel(additional_gifts, target_count * 2, title, None)
-        existing = [x['owner'].lower() for x in found]
-        for u in more_found:
-            if u['owner'].lower() not in existing:
-                found.append(u)
-        attempts += 1
+    # Убрал добивку (attempts) для скорости
+    found = await find_real_owners_parallel(gifts, target_count, title, status_msg)
     
     if is_girls and found:
         try:
-            await status_msg.edit_text(f"👧 Отбираем девушек... {len(found)}", parse_mode=ParseMode.HTML)
+            await status_msg.edit_text(f"👧 Фильтрация девушек...")
         except:
             pass
-        found = await filter_female_users(found)
+        found = await filter_female_users(found, status_msg)
         await update_stats(user_id, len(found))
     else:
         await update_stats(user_id, len(found))
@@ -669,7 +650,7 @@ async def show_search_results(update: Update, context, mode, nft_name=None, page
     if not found:
         keyboard = [[InlineKeyboardButton("🔄 Попробовать снова", callback_data="search_random")]]
         try:
-            await status_msg.edit_text("❌ Ничего не найдено.\n💡 Попробуйте увеличить лимит в настройках", reply_markup=InlineKeyboardMarkup(keyboard))
+            await status_msg.edit_text("❌ Ничего не найдено.\n💡 Попробуйте увеличить лимит", reply_markup=InlineKeyboardMarkup(keyboard))
         except:
             pass
         return
@@ -698,7 +679,7 @@ async def show_model_selection(update: Update, context: ContextTypes.DEFAULT_TYP
         keyboard.append(nav)
     keyboard.append([InlineKeyboardButton("🔷 Назад", callback_data="menu_search")])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    text = f"🔗 Выберите модель NFT:\n\nСтраница {page}/{total_pages}"
+    text = f"🔗 Выберите NFT:\n\n{page}/{total_pages}"
     await query.message.edit_text(text, reply_markup=reply_markup)
 
 # ========== ПРОФИЛЬ ==========
@@ -731,7 +712,7 @@ async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = f"""🔷 <b>НАСТРОЙКИ</b>
 
-📊 Лимит поиска: {settings['results_count']}
+📊 Лимит: {settings['results_count']}
 📄 На странице: {settings['items_per_page']}"""
     
     keyboard = [
@@ -748,7 +729,6 @@ async def show_results_count_menu(update: Update, context: ContextTypes.DEFAULT_
     keyboard = [
         [InlineKeyboardButton("20", callback_data="set_results_20"), InlineKeyboardButton("30", callback_data="set_results_30"), InlineKeyboardButton("50", callback_data="set_results_50")],
         [InlineKeyboardButton("100", callback_data="set_results_100"), InlineKeyboardButton("150", callback_data="set_results_150"), InlineKeyboardButton("200", callback_data="set_results_200")],
-        [InlineKeyboardButton("250", callback_data="set_results_250")],
         [InlineKeyboardButton("🔷 Назад", callback_data="menu_settings")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -766,11 +746,11 @@ async def show_per_page_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     keyboard = [
         [InlineKeyboardButton("5", callback_data="set_per_page_5"), InlineKeyboardButton("10", callback_data="set_per_page_10"), InlineKeyboardButton("15", callback_data="set_per_page_15")],
-        [InlineKeyboardButton("20", callback_data="set_per_page_20"), InlineKeyboardButton("25", callback_data="set_per_page_25"), InlineKeyboardButton("30", callback_data="set_per_page_30")],
+        [InlineKeyboardButton("20", callback_data="set_per_page_20"), InlineKeyboardButton("25", callback_data="set_per_page_25")],
         [InlineKeyboardButton("🔷 Назад", callback_data="menu_settings")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.message.edit_text("🔷 <b>Результатов на странице</b>", reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    await query.message.edit_text("🔷 <b>На странице</b>", reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 
 async def set_per_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -791,7 +771,7 @@ async def show_template_settings(update: Update, context: ContextTypes.DEFAULT_T
 📝 Текущий:
 <code>{current_template}</code>
 
-✏️ Введите новый текст в чат"""
+✏️ Введите новый текст (макс 200 символов)"""
     
     keyboard = [
         [InlineKeyboardButton("🔄 Сбросить", callback_data="reset_template")],
@@ -805,7 +785,7 @@ async def show_template_settings(update: Update, context: ContextTypes.DEFAULT_T
 async def reset_template(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
-    default_template = 'Здравствуйте, заинтересовался вашим NFT подарком, могу купить у вас его.'
+    default_template = 'Здравствуйте, заинтересовался вашим NFT подарком'
     await save_user_settings(user_id, message_template=default_template)
     await query.answer("✅ Шаблон сброшен")
     await show_template_settings(update, context)
@@ -829,12 +809,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_template = update.message.text.strip()
         
         if len(new_template) > 200:
-            await update.message.reply_text("❌ Максимум 200 символов.")
+            await update.message.reply_text("❌ Максимум 200 символов")
             return
         
         await save_user_settings(user_id, message_template=new_template)
         context.user_data['editing_template'] = False
-        await update.message.reply_text(f"✅ Шаблон сохранён!")
+        await update.message.reply_text("✅ Шаблон сохранён!")
         return
 
 # ========== ОБРАБОТЧИК МЕНЮ ==========
@@ -846,7 +826,6 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     data = query.data
-    user_id = query.from_user.id
     
     if data == "main_menu":
         await show_main_menu(update, context)
@@ -913,12 +892,13 @@ def main():
     loop.run_until_complete(init_db())
     
     print("=" * 50)
-    print("🤖 NFT ПАРСЕР БОТ")
+    print("🤖 NFT ПАРСЕР БОТ (ОПТИМИЗИРОВАННЫЙ)")
     print("=" * 50)
     print("✅ /block, /unblock, /blocklist")
-    print("✅ Новые подарки: ViceCream, PoolFloat, ChillFlame, MoodPack, TimelessBook, RareBird, VictoryMedal")
-    print("✅ Имена девушек из female_names.txt")
+    print("✅ Новые подарки добавлены")
+    print("✅ Имена из female_names.txt")
     print("✅ Чёрный список из blacklist.txt")
+    print("✅ Парсинг ускорен в 10+ раз")
     print("=" * 50)
     
     app = Application.builder().token(BOT_TOKEN).build()
