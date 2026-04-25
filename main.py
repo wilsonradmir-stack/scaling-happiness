@@ -12,7 +12,7 @@ from telegram.constants import ParseMode
 
 # ========== КОНФИГ (ЗАМЕНИ НА СВОИ) ==========
 BOT_TOKEN = "8621288234:AAHnKXRfCkRDKe4XoMmaY5-5IOgM3LjNHkU"
-CHANNEL_LINK = "https://t.me/+WLiiYR7_ymZjYWY1"
+CHANNEL_LINK = "https://t.me/+Rp7lu1zatDYzNjll"
 CHANNEL_ID = -1003256576224
 ADMIN_ID = 571001160
 
