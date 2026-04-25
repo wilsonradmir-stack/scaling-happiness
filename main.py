@@ -11,11 +11,10 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from telegram.constants import ParseMode
 
 # ========== ТВОИ ДАННЫЕ ==========
-BOT_TOKEN = "ВАШТОКЕН"
-CHANNEL_LINK = "ССЫЛКАДЛЯКНОПКИ"
+BOT_TOKEN = "8621288234:AAHnKXRfCkRDKe4XoMmaY5-5IOgM3LjNHkU"
+CHANNEL_LINK = "https://t.me/+Rp7lu1zatDYzNjll"
 CHANNEL_ID = -1003256576224
-YOUR_TELEGRAM_ID = АЙДИ ТГ
-ADMIN_ID = YOUR_TELEGRAM_ID
+ADMIN_ID = 571001160
 
 # ========== НАСТРОЙКИ ==========
 logging.basicConfig(
